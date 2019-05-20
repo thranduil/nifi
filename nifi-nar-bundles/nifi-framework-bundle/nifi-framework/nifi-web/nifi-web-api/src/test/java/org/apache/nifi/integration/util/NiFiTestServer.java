@@ -16,7 +16,6 @@
  */
 package org.apache.nifi.integration.util;
 
-import com.sun.jersey.api.client.Client;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.nifi.framework.security.util.SslContextFactory;
 import org.apache.nifi.services.FlowService;
@@ -36,6 +35,7 @@ import org.springframework.web.context.WebApplicationContext;
 import org.springframework.web.context.support.WebApplicationContextUtils;
 
 import javax.servlet.ServletContext;
+import javax.ws.rs.client.Client;
 import java.io.File;
 import java.util.Collections;
 
@@ -77,6 +77,11 @@ public class NiFiTestServer {
 
     private void createSecureConnector() {
         org.eclipse.jetty.util.ssl.SslContextFactory contextFactory = new org.eclipse.jetty.util.ssl.SslContextFactory();
+
+        // Need to set SslContextFactory's endpointIdentificationAlgorithm to null; this is a server,
+        // not a client.  Server does not need to perform hostname verification on the client.
+        // Previous to Jetty 9.4.15.v20190215, this defaulted to null, and now defaults to "HTTPS".
+        contextFactory.setEndpointIdentificationAlgorithm(null);
 
         // require client auth when not supporting login or anonymous access
         if (StringUtils.isBlank(properties.getProperty(NiFiProperties.SECURITY_USER_LOGIN_IDENTITY_PROVIDER))) {

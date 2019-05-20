@@ -37,8 +37,12 @@ public class StandardInputPortDAO extends ComponentDAO implements PortDAO {
     private FlowController flowController;
 
     private Port locatePort(final String portId) {
-        final ProcessGroup rootGroup = flowController.getGroup(flowController.getRootGroupId());
-        final Port port = rootGroup.findInputPort(portId);
+        final ProcessGroup rootGroup = flowController.getFlowManager().getRootGroup();
+        Port port = rootGroup.findInputPort(portId);
+
+        if (port == null) {
+            port = rootGroup.findOutputPort(portId);
+        }
 
         if (port == null) {
             throw new ResourceNotFoundException(String.format("Unable to find port with id '%s'.", portId));
@@ -49,13 +53,13 @@ public class StandardInputPortDAO extends ComponentDAO implements PortDAO {
 
     @Override
     public boolean hasPort(String portId) {
-        final ProcessGroup rootGroup = flowController.getGroup(flowController.getRootGroupId());
-        return rootGroup.findInputPort(portId) != null;
+        final ProcessGroup rootGroup = flowController.getFlowManager().getRootGroup();
+        return rootGroup.findInputPort(portId) != null || rootGroup.findOutputPort(portId) != null;
     }
 
     @Override
     public Port createPort(String groupId, PortDTO portDTO) {
-        if (isNotNull(portDTO.getParentGroupId()) && !flowController.areGroupsSame(groupId, portDTO.getParentGroupId())) {
+        if (isNotNull(portDTO.getParentGroupId()) && !flowController.getFlowManager().areGroupsSame(groupId, portDTO.getParentGroupId())) {
             throw new IllegalArgumentException("Cannot specify a different Parent Group ID than the Group to which the InputPort is being added.");
         }
 
@@ -70,9 +74,9 @@ public class StandardInputPortDAO extends ComponentDAO implements PortDAO {
         // determine if this is the root group
         Port port;
         if (group.getParent() == null) {
-            port = flowController.createRemoteInputPort(portDTO.getId(), portDTO.getName());
+            port = flowController.getFlowManager().createRemoteInputPort(portDTO.getId(), portDTO.getName());
         } else {
-            port = flowController.createLocalInputPort(portDTO.getId(), portDTO.getName());
+            port = flowController.getFlowManager().createLocalInputPort(portDTO.getId(), portDTO.getName());
         }
 
         // ensure we can perform the update before we add the processor to the flow
@@ -158,7 +162,7 @@ public class StandardInputPortDAO extends ComponentDAO implements PortDAO {
         List<String> validationErrors = new ArrayList<>();
 
         if (isNotNull(portDTO.getName()) && portDTO.getName().trim().isEmpty()) {
-            validationErrors.add("Port name cannot be blank.");
+            validationErrors.add("The name of the port must be specified.");
         }
         if (isNotNull(portDTO.getConcurrentlySchedulableTaskCount()) && portDTO.getConcurrentlySchedulableTaskCount() <= 0) {
             validationErrors.add("Concurrent tasks must be a positive integer.");
@@ -233,6 +237,7 @@ public class StandardInputPortDAO extends ComponentDAO implements PortDAO {
             inputPort.setMaxConcurrentTasks(concurrentTasks);
         }
 
+        inputPort.getProcessGroup().onComponentModified();
         return inputPort;
     }
 

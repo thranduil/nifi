@@ -17,21 +17,11 @@
 
 package org.apache.nifi.lookup;
 
-import java.util.Optional;
-
 public interface StringLookupService extends LookupService<String> {
-
-    /**
-     * Returns an Optional value that corresponds to the given key
-     *
-     * @param key the key to lookup
-     * @return an Optional String that represents the value for the given key
-     */
-    @Override
-    Optional<String> lookup(String key);
 
     @Override
     default Class<?> getValueType() {
         return String.class;
     }
+
 }

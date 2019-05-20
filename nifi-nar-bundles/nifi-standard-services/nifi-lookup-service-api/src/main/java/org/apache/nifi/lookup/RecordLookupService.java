@@ -17,22 +17,9 @@
 
 package org.apache.nifi.lookup;
 
-import java.util.Optional;
-
 import org.apache.nifi.serialization.record.Record;
 
 public interface RecordLookupService extends LookupService<Record> {
-
-    /**
-     * Returns an Optional Record that corresponds to the given key
-     *
-     * @param key the key to lookup
-     * @return an Optional Record that corresponds to the given key
-     *
-     * @throws LookupFailureException if unable to lookup a value for the given key
-     */
-    @Override
-    Optional<Record> lookup(String key) throws LookupFailureException;
 
     @Override
     default Class<?> getValueType() {

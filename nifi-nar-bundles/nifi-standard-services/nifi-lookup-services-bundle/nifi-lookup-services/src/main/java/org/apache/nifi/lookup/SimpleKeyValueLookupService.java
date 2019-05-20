@@ -20,7 +20,9 @@ package org.apache.nifi.lookup;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import org.apache.nifi.annotation.documentation.CapabilityDescription;
 import org.apache.nifi.annotation.documentation.Tags;
@@ -29,10 +31,14 @@ import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.components.Validator;
 import org.apache.nifi.controller.AbstractControllerService;
 import org.apache.nifi.controller.ConfigurationContext;
+import org.apache.nifi.expression.ExpressionLanguageScope;
 
 @Tags({"lookup", "enrich", "key", "value"})
-@CapabilityDescription("Allows users to add key/value pairs as User-defined Properties. Each property that is added can be looked up by Property Name.")
+@CapabilityDescription("Allows users to add key/value pairs as User-defined Properties. Each property that is added can be looked up by Property Name. "
+    + "The coordinates that are passed to the lookup must contain the key 'key'.")
 public class SimpleKeyValueLookupService extends AbstractControllerService implements StringLookupService {
+    private static final String KEY = "key";
+    private static final Set<String> REQUIRED_KEYS = Stream.of(KEY).collect(Collectors.toSet());
     private volatile Map<String, String> lookupValues = new HashMap<>();
 
     @Override
@@ -42,17 +48,33 @@ public class SimpleKeyValueLookupService extends AbstractControllerService imple
             .required(false)
             .dynamic(true)
             .addValidator(Validator.VALID)
+            .expressionLanguageSupported(ExpressionLanguageScope.VARIABLE_REGISTRY)
             .build();
     }
 
     @OnEnabled
     public void cacheConfiguredValues(final ConfigurationContext context) {
         lookupValues = context.getProperties().entrySet().stream()
-            .collect(Collectors.toMap(entry -> entry.getKey().getName(), entry -> context.getProperty(entry.getKey()).getValue()));
+            .collect(Collectors.toMap(entry -> entry.getKey().getName(), entry -> context.getProperty(entry.getKey()).evaluateAttributeExpressions().getValue()));
     }
 
     @Override
-    public Optional<String> lookup(final String key) {
+    public Optional<String> lookup(final Map<String, Object> coordinates) {
+        if (coordinates == null) {
+            return Optional.empty();
+        }
+
+        final String key = coordinates.get(KEY).toString();
+        if (key == null) {
+            return Optional.empty();
+        }
+
         return Optional.ofNullable(lookupValues.get(key));
     }
+
+    @Override
+    public Set<String> getRequiredKeys() {
+        return REQUIRED_KEYS;
+    }
+
 }

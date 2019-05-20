@@ -18,12 +18,12 @@
         <meta charset="utf-8" />
         <title>UpdateRecord</title>
 
-        <link rel="stylesheet" href="/nifi-docs/css/component-usage.css" type="text/css" />
+        <link rel="stylesheet" href="../../../../../css/component-usage.css" type="text/css" />
     </head>
 
     <body>
     	<p>
-    		UpdateRecord makes use of the NiFi <a href="/nifi-docs/html/record-path-guide.html">
+    		UpdateRecord makes use of the NiFi <a href="../../../../../html/record-path-guide.html">
     		RecordPath Domain-Specific Language (DSL)</a> to allow the user
     		to indicate which field(s) in the Record should be updated. Users do this by adding a User-defined
     		Property to the Processor's configuration. The name of the User-defined Property must be the
@@ -47,7 +47,7 @@
     		match will be updated. If the replacement value is itself a RecordPath that does not match, then a
     		<code>null</code> value will be set for the field. For instances where this is not the desired behavior,
     		RecordPath predicates can be used to filter the fields that match so that no fields will be selected.
-    		See <a href="/nifi-docs/html/record-path-guide.html#predicates">RecordPath Predicates</a> for more information.
+    		See <a href="../../../../../html/record-path-guide.html#predicates">RecordPath Predicates</a> for more information.
     	</p>
     	
     	<p>
@@ -327,6 +327,64 @@
 			others were of type INT. This is okay because the RecordReaders and RecordWriters should handle
 			these simple type coercions for us.
 		</p>
+
+
+
+
+		<h3>Example 5 - Use Expression Language to Modify Value</h3>
+		
+		<p>
+			This example will capitalize the value of all 'name' fields, regardless of
+			where in the Record hierarchy the field is found. This is done by referencing the 'field.value' variable in the Expression Language.
+			We can also access the field.name variable and the field.type variable.
+		</p>
+
+		<table>
+    		<tr>
+    			<th>Property Name</th>
+    			<th>Property Value</th>
+    		</tr>
+			<tr>
+				<td>Replacement Value Strategy</td>
+				<td>Literal Value</td>
+			</tr>
+			<tr>
+				<td>//name</td>
+				<td>${field.value:toUpper()}</td>
+			</tr>
+		</table>
+		
+		<p>
+			This will yield the following output:
+		</p>
+
+<code>
+<pre>
+  [{
+    "id": 17,
+    "name": "JOHN",
+    "child": {
+        "id": "1"
+    },
+    "siblingIds": [4, 8],
+    "siblings": [
+        { "name": "JEREMY", "id": 4 },
+        { "name": "JULIA", "id": 8 }
+    ]
+  },
+  {
+    "id": 98,
+    "name": "JANE",
+    "child": {
+        "id": 2
+    },
+    "gender": "F",
+    "siblingIds": [],
+    "siblings": []
+  }]
+</pre>
+</code>
+
 
 	</body>
 </html>

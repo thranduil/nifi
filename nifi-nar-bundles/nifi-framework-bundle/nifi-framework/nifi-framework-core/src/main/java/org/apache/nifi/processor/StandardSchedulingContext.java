@@ -16,6 +16,7 @@
  */
 package org.apache.nifi.processor;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -56,8 +57,12 @@ public class StandardSchedulingContext implements SchedulingContext {
             throw new IllegalStateException("Cannot lease Controller Service because Controller Service " + serviceNode.getProxiedControllerService().getIdentifier() + " is not currently enabled");
         }
 
-        if (!serviceNode.isValid()) {
-            throw new IllegalStateException("Cannot lease Controller Service because Controller Service " + serviceNode.getProxiedControllerService().getIdentifier() + " is not currently valid");
+        switch (serviceNode.getValidationStatus()) {
+            case INVALID:
+                throw new IllegalStateException("Cannot lease Controller Service because Controller Service " + serviceNode.getProxiedControllerService().getIdentifier() + " is not currently valid");
+            case VALIDATING:
+                throw new IllegalStateException("Cannot lease Controller Service because Controller Service "
+                    + serviceNode.getProxiedControllerService().getIdentifier() + " is in the process of validating its configuration");
         }
 
         serviceNode.addReference(processorNode);
@@ -96,6 +101,15 @@ public class StandardSchedulingContext implements SchedulingContext {
     @Override
     public Map<PropertyDescriptor, String> getProperties() {
         return processContext.getProperties();
+    }
+
+    @Override
+    public Map<String, String> getAllProperties() {
+        final Map<String,String> propValueMap = new LinkedHashMap<>();
+        for (final Map.Entry<PropertyDescriptor, String> entry : getProperties().entrySet()) {
+            propValueMap.put(entry.getKey().getName(), entry.getValue());
+        }
+        return propValueMap;
     }
 
     @Override

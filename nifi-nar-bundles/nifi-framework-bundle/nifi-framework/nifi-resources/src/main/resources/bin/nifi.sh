@@ -81,6 +81,11 @@ detectOS() {
          export LDR_CNTRL=MAXDATA=0xB0000000@DSA
          echo ${LDR_CNTRL}
     fi
+    # In addition to those, go around the linux space and query the widely
+    # adopted /etc/os-release to detect linux variants
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+    fi
 }
 
 unlimitFD() {
@@ -174,6 +179,8 @@ install() {
         SVC_NAME=$2
     fi
 
+    # since systemd seems to honour /etc/init.d we don't still create native systemd services
+    # yet...
     initd_dir='/etc/init.d'
     SVC_FILE="${initd_dir}/${SVC_NAME}"
 
@@ -222,11 +229,22 @@ SERVICEDESCRIPTOR
     # Provide the user execute access on the file
     chmod u+x ${SVC_FILE}
 
-    rm -f "/etc/rc2.d/S65${SVC_NAME}"
-    ln -s "/etc/init.d/${SVC_NAME}" "/etc/rc2.d/S65${SVC_NAME}" || { echo "Could not create link /etc/rc2.d/S65${SVC_NAME}"; exit 1; }
-    rm -f "/etc/rc2.d/K65${SVC_NAME}"
-    ln -s "/etc/init.d/${SVC_NAME}" "/etc/rc2.d/K65${SVC_NAME}" || { echo "Could not create link /etc/rc2.d/K65${SVC_NAME}"; exit 1; }
-    echo "Service ${SVC_NAME} installed"
+
+    # If SLES or OpenSuse...
+    if [ "${ID}" = "opensuse" ] || [ "${ID}" = "sles" ]; then
+        rm -f "/etc/rc.d/rc2.d/S65${SVC_NAME}"
+        ln -s "/etc/init.d/${SVC_NAME}" "/etc/rc.d/rc2.d/S65${SVC_NAME}" || { echo "Could not create link /etc/rc.d/rc2.d/S65${SVC_NAME}"; exit 1; }
+        rm -f "/etc/rc.d/rc2.d/K65${SVC_NAME}"
+        ln -s "/etc/init.d/${SVC_NAME}" "/etc/rc.d/rc2.d/K65${SVC_NAME}" || { echo "Could not create link /etc/rc.d/rc2.d/K65${SVC_NAME}"; exit 1; }
+        echo "Service ${SVC_NAME} installed"
+    # Anything other fallback to the old approach
+    else
+        rm -f "/etc/rc2.d/S65${SVC_NAME}"
+        ln -s "/etc/init.d/${SVC_NAME}" "/etc/rc2.d/S65${SVC_NAME}" || { echo "Could not create link /etc/rc2.d/S65${SVC_NAME}"; exit 1; }
+        rm -f "/etc/rc2.d/K65${SVC_NAME}"
+        ln -s "/etc/init.d/${SVC_NAME}" "/etc/rc2.d/K65${SVC_NAME}" || { echo "Could not create link /etc/rc2.d/K65${SVC_NAME}"; exit 1; }
+        echo "Service ${SVC_NAME} installed"
+    fi
 }
 
 run() {
@@ -285,9 +303,12 @@ run() {
     BOOTSTRAP_PID_PARAMS="-Dorg.apache.nifi.bootstrap.config.pid.dir='${NIFI_PID_DIR}'"
     BOOTSTRAP_CONF_PARAMS="-Dorg.apache.nifi.bootstrap.config.file='${BOOTSTRAP_CONF}'"
 
+    # uncomment to allow debugging of the bootstrap process
+    #BOOTSTRAP_DEBUG_PARAMS="-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=8000"
+
     BOOTSTRAP_DIR_PARAMS="${BOOTSTRAP_LOG_PARAMS} ${BOOTSTRAP_PID_PARAMS} ${BOOTSTRAP_CONF_PARAMS}"
 
-    run_nifi_cmd="'${JAVA}' -cp '${BOOTSTRAP_CLASSPATH}' -Xms12m -Xmx24m ${BOOTSTRAP_DIR_PARAMS} org.apache.nifi.bootstrap.RunNiFi $@"
+    run_nifi_cmd="'${JAVA}' -cp '${BOOTSTRAP_CLASSPATH}' -Xms12m -Xmx24m ${BOOTSTRAP_DIR_PARAMS} ${BOOTSTRAP_DEBUG_PARAMS} ${BOOTSTRAP_JAVA_OPTS} org.apache.nifi.bootstrap.RunNiFi $@"
 
     if [ -n "${run_as_user}" ]; then
       # Provide SCRIPT_DIR and execute nifi-env for the run.as user command

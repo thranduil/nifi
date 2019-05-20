@@ -17,11 +17,6 @@
 
 package org.apache.nifi.controller.repository;
 
-import java.io.DataInputStream;
-import java.io.DataOutputStream;
-import java.io.IOException;
-import java.util.Map;
-
 import org.apache.nifi.controller.queue.FlowFileQueue;
 import org.apache.nifi.controller.repository.claim.ContentClaim;
 import org.apache.nifi.controller.repository.claim.ResourceClaimManager;
@@ -33,6 +28,7 @@ import org.apache.nifi.controller.repository.schema.RepositoryRecordSchema;
 import org.apache.nifi.controller.repository.schema.RepositoryRecordUpdate;
 import org.apache.nifi.repository.schema.FieldType;
 import org.apache.nifi.repository.schema.Record;
+import org.apache.nifi.repository.schema.RecordIterator;
 import org.apache.nifi.repository.schema.RecordSchema;
 import org.apache.nifi.repository.schema.Repetition;
 import org.apache.nifi.repository.schema.SchemaRecordReader;
@@ -41,7 +37,13 @@ import org.apache.nifi.repository.schema.SimpleRecordField;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.wali.SerDe;
-import org.wali.UpdateType;
+
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.EOFException;
+import java.io.File;
+import java.io.IOException;
+import java.util.Map;
 
 public class SchemaRepositoryRecordSerde extends RepositoryRecordSerde implements SerDe<RepositoryRecord> {
     private static final Logger logger = LoggerFactory.getLogger(SchemaRepositoryRecordSerde.class);
@@ -51,7 +53,8 @@ public class SchemaRepositoryRecordSerde extends RepositoryRecordSerde implement
     private final RecordSchema contentClaimSchema = ContentClaimSchema.CONTENT_CLAIM_SCHEMA_V1;
 
     private final ResourceClaimManager resourceClaimManager;
-    private volatile RecordSchema recoverySchema;
+    private volatile SchemaRecordReader reader;
+    private RecordIterator recordIterator = null;
 
     public SchemaRepositoryRecordSerde(final ResourceClaimManager resourceClaimManager) {
         this.resourceClaimManager = resourceClaimManager;
@@ -101,18 +104,61 @@ public class SchemaRepositoryRecordSerde extends RepositoryRecordSerde implement
 
     @Override
     public void readHeader(final DataInputStream in) throws IOException {
-        recoverySchema = RecordSchema.readFrom(in);
+        final RecordSchema recoverySchema = RecordSchema.readFrom(in);
+        reader = SchemaRecordReader.fromSchema(recoverySchema);
     }
 
     @Override
     public RepositoryRecord deserializeEdit(final DataInputStream in, final Map<Object, RepositoryRecord> currentRecordStates, final int version) throws IOException {
-        return deserializeRecord(in, version);
+        final RepositoryRecord record = deserializeRecord(in, version);
+        if (record != null) {
+            return record;
+        }
+
+        // deserializeRecord may return a null if there is no more data. However, when we are deserializing
+        // an edit, we do so only when we know that we should have data. This is why the JavaDocs for this method
+        // on the interface indicate that this method should never return null. As a result, if there is no data
+        // available, we handle this by throwing an EOFException.
+        throw new EOFException();
     }
 
     @Override
     public RepositoryRecord deserializeRecord(final DataInputStream in, final int version) throws IOException {
-        final SchemaRecordReader reader = SchemaRecordReader.fromSchema(recoverySchema);
-        final Record updateRecord = reader.readRecord(in);
+        if (recordIterator != null) {
+            final RepositoryRecord record = nextRecord();
+            if (record != null) {
+                return record;
+            }
+
+            recordIterator.close();
+        }
+
+        recordIterator = reader.readRecords(in);
+        if (recordIterator == null) {
+            return null;
+        }
+
+        return nextRecord();
+    }
+
+    private RepositoryRecord nextRecord() throws IOException {
+        final Record record;
+        try {
+            record = recordIterator.next();
+        } catch (final Exception e) {
+            recordIterator.close();
+            recordIterator = null;
+            throw e;
+        }
+
+        if (record == null) {
+            return null;
+        }
+
+        return createRepositoryRecord(record);
+    }
+
+    private RepositoryRecord createRepositoryRecord(final Record updateRecord) throws IOException {
         if (updateRecord == null) {
             // null may be returned by reader.readRecord() if it encounters end-of-stream
             return null;
@@ -123,10 +169,11 @@ public class SchemaRepositoryRecordSerde extends RepositoryRecordSerde implement
         final Record record = (Record) updateRecord.getFieldValue(RepositoryRecordSchema.REPOSITORY_RECORD_UPDATE_V2);
 
         final String actionType = (String) record.getFieldValue(RepositoryRecordSchema.ACTION_TYPE_FIELD);
-        final UpdateType updateType = UpdateType.valueOf(actionType);
-        switch (updateType) {
+        final RepositoryRecordType recordType = RepositoryRecordType.valueOf(actionType);
+        switch (recordType) {
             case CREATE:
                 return createRecord(record);
+            case CONTENTMISSING:
             case DELETE:
                 return deleteRecord(record);
             case SWAP_IN:
@@ -135,9 +182,9 @@ public class SchemaRepositoryRecordSerde extends RepositoryRecordSerde implement
                 return swapOutRecord(record);
             case UPDATE:
                 return updateRecord(record);
-            default:
-                throw new IOException("Found unrecognized Update Type '" + actionType + "'");
         }
+
+        throw new IOException("Found unrecognized Update Type '" + actionType + "'");
     }
 
 
@@ -236,4 +283,18 @@ public class SchemaRepositoryRecordSerde extends RepositoryRecordSerde implement
         return MAX_ENCODING_VERSION;
     }
 
+    @Override
+    public boolean isWriteExternalFileReferenceSupported() {
+        return true;
+    }
+
+    @Override
+    public void writeExternalFileReference(final File externalFile, final DataOutputStream out) throws IOException {
+        new SchemaRecordWriter().writeExternalFileReference(out, externalFile);
+    }
+
+    @Override
+    public boolean isMoreInExternalFile() throws IOException {
+        return recordIterator != null && recordIterator.isNext();
+    }
 }

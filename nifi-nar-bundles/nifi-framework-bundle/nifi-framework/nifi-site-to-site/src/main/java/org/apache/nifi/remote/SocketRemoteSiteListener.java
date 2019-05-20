@@ -17,6 +17,7 @@
 package org.apache.nifi.remote;
 
 import org.apache.nifi.groups.ProcessGroup;
+import org.apache.nifi.remote.cluster.ClusterNodeInformation;
 import org.apache.nifi.remote.cluster.NodeInformant;
 import org.apache.nifi.remote.cluster.NodeInformation;
 import org.apache.nifi.remote.exception.BadRequestException;
@@ -29,6 +30,7 @@ import org.apache.nifi.remote.io.socket.ssl.SSLSocketChannelCommunicationsSessio
 import org.apache.nifi.remote.protocol.CommunicationsSession;
 import org.apache.nifi.remote.protocol.RequestType;
 import org.apache.nifi.remote.protocol.ServerProtocol;
+import org.apache.nifi.util.NiFiProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -46,22 +48,21 @@ import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
-import org.apache.nifi.remote.cluster.ClusterNodeInformation;
-import org.apache.nifi.util.NiFiProperties;
 
 public class SocketRemoteSiteListener implements RemoteSiteListener {
-
-    public static final String DEFAULT_FLOWFILE_PATH = "./";
 
     private final int socketPort;
     private final SSLContext sslContext;
     private final NodeInformant nodeInformant;
     private final AtomicReference<ProcessGroup> rootGroup = new AtomicReference<>();
     private final NiFiProperties nifiProperties;
+    private final PeerDescriptionModifier peerDescriptionModifier;
 
     private final AtomicBoolean stopped = new AtomicBoolean(false);
 
@@ -76,6 +77,7 @@ public class SocketRemoteSiteListener implements RemoteSiteListener {
         this.sslContext = sslContext;
         this.nifiProperties = nifiProperties;
         this.nodeInformant = nodeInformant;
+        peerDescriptionModifier = new PeerDescriptionModifier(nifiProperties);
     }
 
     @Override
@@ -86,6 +88,7 @@ public class SocketRemoteSiteListener implements RemoteSiteListener {
     @Override
     public void start() throws IOException {
         final boolean secure = (sslContext != null);
+        final List<Thread> threads = new ArrayList<Thread>();
 
         final ServerSocketChannel serverSocketChannel = ServerSocketChannel.open();
         serverSocketChannel.configureBlocking(true);
@@ -132,8 +135,9 @@ public class SocketRemoteSiteListener implements RemoteSiteListener {
                     LOG.trace("Got connection");
 
                     if (stopped.get()) {
-                        return;
+                        break;
                     }
+
                     final Socket socket = acceptedSocket;
                     final SocketChannel socketChannel = socket.getChannel();
                     final Thread thread = new Thread(new Runnable() {
@@ -214,6 +218,9 @@ public class SocketRemoteSiteListener implements RemoteSiteListener {
                                 protocol = RemoteResourceFactory.receiveServerProtocolNegotiation(dis, dos);
                                 protocol.setRootProcessGroup(rootGroup.get());
                                 protocol.setNodeInformant(nodeInformant);
+                                if (protocol instanceof PeerDescriptionModifiable) {
+                                    ((PeerDescriptionModifiable)protocol).setPeerDescriptionModifier(peerDescriptionModifier);
+                                }
 
                                 final PeerDescription description = new PeerDescription(clientHostName, clientPort, sslContext != null);
                                 peer = new Peer(description, commsSession, peerUri, "nifi://localhost:" + getPort());
@@ -304,6 +311,14 @@ public class SocketRemoteSiteListener implements RemoteSiteListener {
                     thread.setName("Site-to-Site Worker Thread-" + (threadCount++));
                     LOG.debug("Handing connection to {}", thread);
                     thread.start();
+                    threads.add(thread);
+                    threads.removeIf(t -> !t.isAlive());
+                }
+
+                for(Thread thread : threads) {
+                    if(thread != null) {
+                        thread.interrupt();
+                    }
                 }
             }
         });
@@ -356,6 +371,10 @@ public class SocketRemoteSiteListener implements RemoteSiteListener {
     @Override
     public void stop() {
         stopped.set(true);
+    }
+
+    @Override
+    public void destroy() {
     }
 
     private void verifyMagicBytes(final InputStream in, final String peerDescription) throws IOException, HandshakeException {

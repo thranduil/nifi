@@ -16,6 +16,22 @@
  */
 package org.apache.nifi.util;
 
+import org.apache.nifi.controller.queue.QueueSize;
+import org.apache.nifi.flowfile.FlowFile;
+import org.apache.nifi.flowfile.attributes.CoreAttributes;
+import org.apache.nifi.processor.FlowFileFilter;
+import org.apache.nifi.processor.ProcessSession;
+import org.apache.nifi.processor.Processor;
+import org.apache.nifi.processor.Relationship;
+import org.apache.nifi.processor.exception.FlowFileAccessException;
+import org.apache.nifi.processor.exception.FlowFileHandlingException;
+import org.apache.nifi.processor.exception.ProcessException;
+import org.apache.nifi.processor.io.InputStreamCallback;
+import org.apache.nifi.processor.io.OutputStreamCallback;
+import org.apache.nifi.processor.io.StreamCallback;
+import org.apache.nifi.provenance.ProvenanceReporter;
+import org.junit.Assert;
+
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
@@ -42,22 +58,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
-
-import org.apache.nifi.controller.queue.QueueSize;
-import org.apache.nifi.flowfile.FlowFile;
-import org.apache.nifi.flowfile.attributes.CoreAttributes;
-import org.apache.nifi.processor.FlowFileFilter;
-import org.apache.nifi.processor.ProcessSession;
-import org.apache.nifi.processor.Processor;
-import org.apache.nifi.processor.Relationship;
-import org.apache.nifi.processor.exception.FlowFileAccessException;
-import org.apache.nifi.processor.exception.FlowFileHandlingException;
-import org.apache.nifi.processor.exception.ProcessException;
-import org.apache.nifi.processor.io.InputStreamCallback;
-import org.apache.nifi.processor.io.OutputStreamCallback;
-import org.apache.nifi.processor.io.StreamCallback;
-import org.apache.nifi.provenance.ProvenanceReporter;
-import org.junit.Assert;
 
 public class MockProcessSession implements ProcessSession {
 
@@ -496,7 +496,14 @@ public class MockProcessSession implements ProcessSession {
         final MockFlowFile newFlowFile = new MockFlowFile(mock.getId(), flowFile);
         currentVersions.put(newFlowFile.getId(), newFlowFile);
 
-        newFlowFile.putAttributes(attrs);
+        final Map<String, String> updatedAttributes;
+        if (attrs.containsKey(CoreAttributes.UUID.key())) {
+            updatedAttributes = new HashMap<>(attrs);
+            updatedAttributes.remove(CoreAttributes.UUID.key());
+        } else {
+            updatedAttributes = attrs;
+        }
+        newFlowFile.putAttributes(updatedAttributes);
         return newFlowFile;
     }
 
@@ -597,6 +604,16 @@ public class MockProcessSession implements ProcessSession {
             public void close() throws IOException {
                 openInputStreams.remove(mock);
                 bais.close();
+            }
+
+            @Override
+            public void mark(final int readlimit) {
+                bais.mark(readlimit);
+            }
+
+            @Override
+            public void reset() {
+                bais.reset();
             }
 
             @Override
@@ -754,6 +771,13 @@ public class MockProcessSession implements ProcessSession {
         flowFile = validateState(flowFile);
         if (!(flowFile instanceof MockFlowFile)) {
             throw new IllegalArgumentException("I only accept MockFlowFile");
+        }
+
+        // if the flowfile provided was created in this session (i.e. it's in currentVersions and not in original versions),
+        // then throw an exception indicating that you can't transfer flowfiles back to self.
+        // this mimics the same behavior in StandardProcessSession
+        if(currentVersions.get(flowFile.getId()) != null && originalVersions.get(flowFile.getId()) == null) {
+            throw new IllegalArgumentException("Cannot transfer FlowFiles that are created in this Session back to self");
         }
 
         final MockFlowFile mockFlowFile = (MockFlowFile) flowFile;
@@ -1291,8 +1315,17 @@ public class MockProcessSession implements ProcessSession {
         final MockFlowFile mockFlowFile = (MockFlowFile) flowFile;
         final MockFlowFile newFlowFile = new MockFlowFile(mockFlowFile.getId(), flowFile);
         currentVersions.put(newFlowFile.getId(), newFlowFile);
-        newFlowFile.setPenalized();
+        newFlowFile.setPenalized(true);
         penalized.add(newFlowFile);
+        return newFlowFile;
+    }
+
+    public MockFlowFile unpenalize(FlowFile flowFile) {
+        flowFile = validateState(flowFile);
+        final MockFlowFile newFlowFile = new MockFlowFile(flowFile.getId(), flowFile);
+        currentVersions.put(newFlowFile.getId(), newFlowFile);
+        newFlowFile.setPenalized(false);
+        penalized.remove(newFlowFile);
         return newFlowFile;
     }
 

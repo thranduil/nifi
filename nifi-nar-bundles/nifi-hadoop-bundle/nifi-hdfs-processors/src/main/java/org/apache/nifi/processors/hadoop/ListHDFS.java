@@ -24,6 +24,7 @@ import org.apache.hadoop.fs.permission.FsAction;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.nifi.annotation.behavior.InputRequirement;
 import org.apache.nifi.annotation.behavior.InputRequirement.Requirement;
+import org.apache.nifi.annotation.behavior.PrimaryNodeOnly;
 import org.apache.nifi.annotation.behavior.Stateful;
 import org.apache.nifi.annotation.behavior.TriggerSerially;
 import org.apache.nifi.annotation.behavior.TriggerWhenEmpty;
@@ -32,7 +33,10 @@ import org.apache.nifi.annotation.behavior.WritesAttributes;
 import org.apache.nifi.annotation.documentation.CapabilityDescription;
 import org.apache.nifi.annotation.documentation.SeeAlso;
 import org.apache.nifi.annotation.documentation.Tags;
+import org.apache.nifi.components.AllowableValue;
 import org.apache.nifi.components.PropertyDescriptor;
+import org.apache.nifi.components.ValidationContext;
+import org.apache.nifi.components.ValidationResult;
 import org.apache.nifi.components.state.Scope;
 import org.apache.nifi.components.state.StateMap;
 import org.apache.nifi.distributed.cache.client.DistributedMapCacheClient;
@@ -47,7 +51,9 @@ import org.apache.nifi.processor.util.StandardValidators;
 
 import java.io.File;
 import java.io.IOException;
+import java.security.PrivilegedExceptionAction;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -58,15 +64,17 @@ import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
-
+@PrimaryNodeOnly
 @TriggerSerially
 @TriggerWhenEmpty
 @InputRequirement(Requirement.INPUT_FORBIDDEN)
 @Tags({"hadoop", "HDFS", "get", "list", "ingest", "source", "filesystem"})
-@CapabilityDescription("Retrieves a listing of files from HDFS. For each file that is listed in HDFS, creates a FlowFile that represents "
-        + "the HDFS file so that it can be fetched in conjunction with FetchHDFS. This Processor is designed to run on Primary Node only "
-        + "in a cluster. If the primary node changes, the new Primary Node will pick up where the previous node left off without duplicating "
-        + "all of the data. Unlike GetHDFS, this Processor does not delete any data from HDFS.")
+@CapabilityDescription("Retrieves a listing of files from HDFS. Each time a listing is performed, the files with the latest timestamp will be excluded "
+        + "and picked up during the next execution of the processor. This is done to ensure that we do not miss any files, or produce duplicates, in the "
+        + "cases where files with the same timestamp are written immediately before and after a single execution of the processor. For each file that is "
+        + "listed in HDFS, this processor creates a FlowFile that represents the HDFS file to be fetched in conjunction with FetchHDFS. This Processor is "
+        +  "designed to run on Primary Node only in a cluster. If the primary node changes, the new Primary Node will pick up where the previous node left "
+        +  "off without duplicating all of the data. Unlike GetHDFS, this Processor does not delete any data from HDFS.")
 @WritesAttributes({
     @WritesAttribute(attribute="filename", description="The name of the file that was read from HDFS."),
     @WritesAttribute(attribute="path", description="The path is set to the absolute path of the file's directory on HDFS. For example, if the Directory property is set to /tmp, "
@@ -80,17 +88,18 @@ import java.util.regex.Pattern;
     @WritesAttribute(attribute="hdfs.permissions", description="The permissions for the file in HDFS. This is formatted as 3 characters for the owner, "
             + "3 for the group, and 3 for other users. For example rw-rw-r--")
 })
-@Stateful(scopes = Scope.CLUSTER, description = "After performing a listing of HDFS files, the timestamp of the newest file is stored, "
-    + "along with the filenames of all files that share that same timestamp. This allows the Processor to list only files that have been added or modified after "
-    + "this date the next time that the Processor is run. State is stored across the cluster so that this Processor can be run on Primary Node only and if a new Primary "
-    + "Node is selected, the new node can pick up where the previous node left off, without duplicating the data.")
+@Stateful(scopes = Scope.CLUSTER, description = "After performing a listing of HDFS files, the latest timestamp of all the files listed and the latest "
+        + "timestamp of all the files transferred are both stored. This allows the Processor to list only files that have been added or modified after "
+        + "this date the next time that the Processor is run, without having to store all of the actual filenames/paths which could lead to performance "
+        + "problems. State is stored across the cluster so that this Processor can be run on Primary Node only and if a new Primary "
+        + "Node is selected, the new node can pick up where the previous node left off, without duplicating the data.")
 @SeeAlso({GetHDFS.class, FetchHDFS.class, PutHDFS.class})
 public class ListHDFS extends AbstractHadoopProcessor {
 
+    @Deprecated
     public static final PropertyDescriptor DISTRIBUTED_CACHE_SERVICE = new PropertyDescriptor.Builder()
         .name("Distributed Cache Service")
-        .description("Specifies the Controller Service that should be used to maintain state about what has been pulled from HDFS so that if a new node "
-                + "begins pulling data, it won't duplicate all of the work that has been done.")
+        .description("This property is ignored.  State will be stored in the " + Scope.LOCAL + " or " + Scope.CLUSTER + " scope by the State Manager based on NiFi's configuration.")
         .required(false)
         .identifiesControllerService(DistributedMapCacheClient.class)
         .build();
@@ -111,6 +120,53 @@ public class ListHDFS extends AbstractHadoopProcessor {
         .addValidator(StandardValidators.REGULAR_EXPRESSION_VALIDATOR)
         .build();
 
+    private static final String FILTER_MODE_DIRECTORIES_AND_FILES = "filter-mode-directories-and-files";
+    private static final String FILTER_MODE_FILES_ONLY = "filter-mode-files-only";
+    private static final String FILTER_MODE_FULL_PATH = "filter-mode-full-path";
+    static final AllowableValue FILTER_DIRECTORIES_AND_FILES_VALUE = new AllowableValue(FILTER_MODE_DIRECTORIES_AND_FILES,
+        "Directories and Files",
+        "Filtering will be applied to the names of directories and files.  If " + RECURSE_SUBDIRS.getName()
+                + " is set to true, only subdirectories with a matching name will be searched for files that match "
+                + "the regular expression defined in " + FILE_FILTER.getName() + ".");
+    static final AllowableValue FILTER_FILES_ONLY_VALUE = new AllowableValue(FILTER_MODE_FILES_ONLY,
+        "Files Only",
+        "Filtering will only be applied to the names of files.  If " + RECURSE_SUBDIRS.getName()
+                + " is set to true, the entire subdirectory tree will be searched for files that match "
+                + "the regular expression defined in " + FILE_FILTER.getName() + ".");
+    static final AllowableValue FILTER_FULL_PATH_VALUE = new AllowableValue(FILTER_MODE_FULL_PATH,
+        "Full Path",
+        "Filtering will be applied to the full path of files.  If " + RECURSE_SUBDIRS.getName()
+                + " is set to true, the entire subdirectory tree will be searched for files in which the full path of "
+                + "the file matches the regular expression defined in " + FILE_FILTER.getName() + ".");
+
+    public static final PropertyDescriptor FILE_FILTER_MODE = new PropertyDescriptor.Builder()
+        .name("file-filter-mode")
+        .displayName("File Filter Mode")
+        .description("Determines how the regular expression in  " + FILE_FILTER.getName() + " will be used when retrieving listings.")
+        .required(true)
+        .allowableValues(FILTER_DIRECTORIES_AND_FILES_VALUE, FILTER_FILES_ONLY_VALUE, FILTER_FULL_PATH_VALUE)
+        .defaultValue(FILTER_DIRECTORIES_AND_FILES_VALUE.getValue())
+        .addValidator(StandardValidators.REGULAR_EXPRESSION_VALIDATOR)
+        .build();
+
+    public static final PropertyDescriptor MIN_AGE = new PropertyDescriptor.Builder()
+        .name("minimum-file-age")
+        .displayName("Minimum File Age")
+        .description("The minimum age that a file must be in order to be pulled; any file younger than this "
+                + "amount of time (based on last modification date) will be ignored")
+        .required(false)
+        .addValidator(StandardValidators.createTimePeriodValidator(0, TimeUnit.MILLISECONDS, Long.MAX_VALUE, TimeUnit.NANOSECONDS))
+        .build();
+
+    public static final PropertyDescriptor MAX_AGE = new PropertyDescriptor.Builder()
+        .name("maximum-file-age")
+        .displayName("Maximum File Age")
+        .description("The maximum age that a file must be in order to be pulled; any file older than this "
+                + "amount of time (based on last modification date) will be ignored. Minimum value is 100ms.")
+        .required(false)
+        .addValidator(StandardValidators.createTimePeriodValidator(100, TimeUnit.MILLISECONDS, Long.MAX_VALUE, TimeUnit.NANOSECONDS))
+        .build();
+
     public static final Relationship REL_SUCCESS = new Relationship.Builder()
         .name("success")
         .description("All FlowFiles are transferred to this relationship")
@@ -119,7 +175,7 @@ public class ListHDFS extends AbstractHadoopProcessor {
     private volatile long latestTimestampListed = -1L;
     private volatile long latestTimestampEmitted = -1L;
     private volatile long lastRunTimestamp = -1L;
-
+    private volatile boolean resetState = false;
     static final String LISTING_TIMESTAMP_KEY = "listing.timestamp";
     static final String EMITTED_TIMESTAMP_KEY = "emitted.timestamp";
 
@@ -141,6 +197,9 @@ public class ListHDFS extends AbstractHadoopProcessor {
         props.add(DIRECTORY);
         props.add(RECURSE_SUBDIRS);
         props.add(FILE_FILTER);
+        props.add(FILE_FILTER_MODE);
+        props.add(MIN_AGE);
+        props.add(MAX_AGE);
         return props;
     }
 
@@ -151,6 +210,23 @@ public class ListHDFS extends AbstractHadoopProcessor {
         return relationships;
     }
 
+    @Override
+    protected Collection<ValidationResult> customValidate(ValidationContext context) {
+        final List<ValidationResult> problems = new ArrayList<>(super.customValidate(context));
+
+        final Long minAgeProp = context.getProperty(MIN_AGE).asTimePeriod(TimeUnit.MILLISECONDS);
+        final Long maxAgeProp = context.getProperty(MAX_AGE).asTimePeriod(TimeUnit.MILLISECONDS);
+        final long minimumAge = (minAgeProp == null) ? 0L : minAgeProp;
+        final long maximumAge = (maxAgeProp == null) ? Long.MAX_VALUE : maxAgeProp;
+
+        if (minimumAge > maximumAge) {
+            problems.add(new ValidationResult.Builder().valid(false).subject("GetHDFS Configuration")
+                    .explanation(MIN_AGE.getName() + " cannot be greater than " + MAX_AGE.getName()).build());
+        }
+
+        return problems;
+    }
+
     protected String getKey(final String directory) {
         return getIdentifier() + ".lastListingTime." + directory;
     }
@@ -159,8 +235,7 @@ public class ListHDFS extends AbstractHadoopProcessor {
     public void onPropertyModified(final PropertyDescriptor descriptor, final String oldValue, final String newValue) {
         super.onPropertyModified(descriptor, oldValue, newValue);
         if (isConfigurationRestored() && (descriptor.equals(DIRECTORY) || descriptor.equals(FILE_FILTER))) {
-            latestTimestampEmitted = -1L;
-            latestTimestampListed = -1L;
+            this.resetState = true;
         }
     }
 
@@ -168,15 +243,28 @@ public class ListHDFS extends AbstractHadoopProcessor {
      * Determines which of the given FileStatus's describes a File that should be listed.
      *
      * @param statuses the eligible FileStatus objects that we could potentially list
+     * @param context processor context with properties values
      * @return a Set containing only those FileStatus objects that we want to list
      */
-    Set<FileStatus> determineListable(final Set<FileStatus> statuses) {
+    Set<FileStatus> determineListable(final Set<FileStatus> statuses, ProcessContext context) {
         final long minTimestamp = this.latestTimestampListed;
         final TreeMap<Long, List<FileStatus>> orderedEntries = new TreeMap<>();
+
+        final Long minAgeProp = context.getProperty(MIN_AGE).asTimePeriod(TimeUnit.MILLISECONDS);
+        // NIFI-4144 - setting to MIN_VALUE so that in case the file modification time is in
+        // the future relative to the nifi instance, files are not skipped.
+        final long minimumAge = (minAgeProp == null) ? Long.MIN_VALUE : minAgeProp;
+        final Long maxAgeProp = context.getProperty(MAX_AGE).asTimePeriod(TimeUnit.MILLISECONDS);
+        final long maximumAge = (maxAgeProp == null) ? Long.MAX_VALUE : maxAgeProp;
 
         // Build a sorted map to determine the latest possible entries
         for (final FileStatus status : statuses) {
             if (status.getPath().getName().endsWith("_COPYING_")) {
+                continue;
+            }
+
+            final long fileAge = System.currentTimeMillis() - status.getModificationTime();
+            if (minimumAge > fileAge || fileAge > maximumAge) {
                 continue;
             }
 
@@ -227,8 +315,6 @@ public class ListHDFS extends AbstractHadoopProcessor {
         return toList;
     }
 
-
-
     @Override
     public void onTrigger(final ProcessContext context, final ProcessSession session) throws ProcessException {
         // We have to ensure that we don't continually perform listings, because if we perform two listings within
@@ -246,6 +332,12 @@ public class ListHDFS extends AbstractHadoopProcessor {
 
         // Ensure that we are using the latest listing information before we try to perform a listing of HDFS files.
         try {
+            if (resetState) {
+                getLogger().debug("Property has been modified. Resetting the state values - listing.timestamp and emitted.timestamp to -1L");
+                context.getStateManager().clear(Scope.CLUSTER);
+                this.resetState = false;
+            }
+
             final StateMap stateMap = context.getStateManager().getState(Scope.CLUSTER);
             if (stateMap.getVersion() == -1L) {
                 latestTimestampEmitted = -1L;
@@ -271,7 +363,7 @@ public class ListHDFS extends AbstractHadoopProcessor {
                 }
             }
         } catch (final IOException ioe) {
-            getLogger().error("Failed to retrieve timestamp of last listing from Distributed Cache Service. Will not perform listing until this is accomplished.");
+            getLogger().error("Failed to retrieve timestamp of last listing from the State Manager. Will not perform listing until this is accomplished.");
             context.yield();
             return;
         }
@@ -279,18 +371,23 @@ public class ListHDFS extends AbstractHadoopProcessor {
         // Pull in any file that is newer than the timestamp that we have.
         final FileSystem hdfs = getFileSystem();
         final boolean recursive = context.getProperty(RECURSE_SUBDIRS).asBoolean();
+        String fileFilterMode = context.getProperty(FILE_FILTER_MODE).getValue();
 
         final Set<FileStatus> statuses;
         try {
             final Path rootPath = new Path(directory);
-            statuses = getStatuses(rootPath, recursive, hdfs, createPathFilter(context));
+            statuses = getStatuses(rootPath, recursive, hdfs, createPathFilter(context), fileFilterMode);
             getLogger().debug("Found a total of {} files in HDFS", new Object[] {statuses.size()});
         } catch (final IOException | IllegalArgumentException e) {
             getLogger().error("Failed to perform listing of HDFS due to {}", new Object[] {e});
             return;
+        } catch (final InterruptedException e) {
+            Thread.currentThread().interrupt();
+            getLogger().error("Interrupted while performing listing of HDFS", e);
+            return;
         }
 
-        final Set<FileStatus> listable = determineListable(statuses);
+        final Set<FileStatus> listable = determineListable(statuses, context);
         getLogger().debug("Of the {} files found in HDFS, {} are listable", new Object[] {statuses.size(), listable.size()});
 
         for (final FileStatus status : listable) {
@@ -326,27 +423,56 @@ public class ListHDFS extends AbstractHadoopProcessor {
         }
     }
 
-    private Set<FileStatus> getStatuses(final Path path, final boolean recursive, final FileSystem hdfs, final PathFilter filter) throws IOException {
+    private Set<FileStatus> getStatuses(final Path path, final boolean recursive, final FileSystem hdfs, final PathFilter filter, String filterMode) throws IOException, InterruptedException {
         final Set<FileStatus> statusSet = new HashSet<>();
 
         getLogger().debug("Fetching listing for {}", new Object[] {path});
-        final FileStatus[] statuses = hdfs.listStatus(path, filter);
+        final FileStatus[] statuses;
+        if (isPostListingFilterNeeded(filterMode)) {
+            // For this filter mode, the filter is not passed to listStatus, so that directory names will not be
+            // filtered out when the listing is recursive.
+            statuses = getUserGroupInformation().doAs((PrivilegedExceptionAction<FileStatus[]>) () -> hdfs.listStatus(path));
+        } else {
+            statuses = getUserGroupInformation().doAs((PrivilegedExceptionAction<FileStatus[]>) () -> hdfs.listStatus(path, filter));
+        }
 
         for ( final FileStatus status : statuses ) {
             if ( status.isDirectory() ) {
                 if ( recursive ) {
                     try {
-                        statusSet.addAll(getStatuses(status.getPath(), recursive, hdfs, filter));
+                        statusSet.addAll(getStatuses(status.getPath(), recursive, hdfs, filter, filterMode));
                     } catch (final IOException ioe) {
                         getLogger().error("Failed to retrieve HDFS listing for subdirectory {} due to {}; will continue listing others", new Object[] {status.getPath(), ioe});
                     }
                 }
             } else {
-                statusSet.add(status);
+                if (isPostListingFilterNeeded(filterMode)) {
+                    // Filtering explicitly performed here, since it was not able to be done when calling listStatus.
+                    if (filter.accept(status.getPath())) {
+                        statusSet.add(status);
+                    }
+                } else {
+                    statusSet.add(status);
+                }
             }
         }
 
         return statusSet;
+    }
+
+    /**
+     * Determines if filtering needs to be applied, after calling {@link FileSystem#listStatus(Path)}, based on the
+     * given filter mode.
+     * Filter modes that need to be able to search directories regardless of the given filter should return true.
+     * FILTER_MODE_FILES_ONLY and FILTER_MODE_FULL_PATH require that {@link FileSystem#listStatus(Path)} be invoked
+     * without a filter so that all directories can be traversed when filtering with these modes.
+     * FILTER_MODE_DIRECTORIES_AND_FILES should return false, since filtering can be applied directly with
+     * {@link FileSystem#listStatus(Path, PathFilter)} regardless of a recursive listing.
+     * @param filterMode the value of one of the defined AllowableValues representing filter modes
+     * @return true if results need to be filtered, false otherwise
+     */
+    private boolean isPostListingFilterNeeded(String filterMode) {
+        return filterMode.equals(FILTER_MODE_FILES_ONLY) || filterMode.equals(FILTER_MODE_FULL_PATH);
     }
 
     private String getAbsolutePath(final Path path) {
@@ -397,11 +523,16 @@ public class ListHDFS extends AbstractHadoopProcessor {
 
     private PathFilter createPathFilter(final ProcessContext context) {
         final Pattern filePattern = Pattern.compile(context.getProperty(FILE_FILTER).getValue());
-        return new PathFilter() {
-            @Override
-            public boolean accept(Path path) {
-                return filePattern.matcher(path.getName()).matches();
+        final String filterMode = context.getProperty(FILE_FILTER_MODE).getValue();
+        return path -> {
+            final boolean accepted;
+            if (FILTER_FULL_PATH_VALUE.getValue().equals(filterMode)) {
+                accepted = filePattern.matcher(path.toString()).matches();
+            } else {
+                accepted =  filePattern.matcher(path.getName()).matches();
             }
+            return accepted;
         };
     }
+
 }

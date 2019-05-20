@@ -16,10 +16,7 @@
  */
 package org.apache.nifi.amqp.processors;
 
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
-
-import org.apache.nifi.authentication.exception.ProviderCreationException;
+import com.rabbitmq.client.Connection;
 import org.apache.nifi.processor.ProcessContext;
 import org.apache.nifi.processor.ProcessSession;
 import org.apache.nifi.processor.exception.ProcessException;
@@ -28,6 +25,10 @@ import org.apache.nifi.util.TestRunner;
 import org.apache.nifi.util.TestRunners;
 import org.junit.Before;
 import org.junit.Test;
+
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
 
 /**
  * Unit tests for the AbstractAMQPProcessor class
@@ -43,13 +44,14 @@ public class AbstractAMQPProcessorTest {
         testRunner = TestRunners.newTestRunner(processor);
     }
 
-    @Test(expected = ProviderCreationException.class)
+    @Test(expected = IllegalStateException.class)
     public void testConnectToCassandraWithSSLBadClientAuth() throws Exception {
         SSLContextService sslService = mock(SSLContextService.class);
         when(sslService.getIdentifier()).thenReturn("ssl-context");
         testRunner.addControllerService("ssl-context", sslService);
         testRunner.enableControllerService(sslService);
         testRunner.setProperty(AbstractAMQPProcessor.SSL_CONTEXT_SERVICE, "ssl-context");
+        testRunner.setProperty(AbstractAMQPProcessor.USE_CERT_AUTHENTICATION, "false");
         testRunner.setProperty(AbstractAMQPProcessor.HOST, "test");
         testRunner.setProperty(AbstractAMQPProcessor.PORT, "9999");
         testRunner.setProperty(AbstractAMQPProcessor.USER, "test");
@@ -59,16 +61,28 @@ public class AbstractAMQPProcessorTest {
         processor.onTrigger(testRunner.getProcessContext(), testRunner.getProcessSessionFactory());
     }
 
+    @Test(expected = IllegalStateException.class)
+    public void testInvalidSSLConfiguration() throws Exception {
+        // it's invalid to have use_cert_auth enabled and not have the SSL Context Service configured
+        testRunner.setProperty(AbstractAMQPProcessor.USE_CERT_AUTHENTICATION, "true");
+        testRunner.setProperty(AbstractAMQPProcessor.HOST, "test");
+        testRunner.setProperty(AbstractAMQPProcessor.PORT, "9999");
+        testRunner.setProperty(AbstractAMQPProcessor.USER, "test");
+        testRunner.setProperty(AbstractAMQPProcessor.PASSWORD, "test");
+        processor.onTrigger(testRunner.getProcessContext(), testRunner.getProcessSessionFactory());
+    }
+
     /**
      * Provides a stubbed processor instance for testing
      */
     public static class MockAbstractAMQPProcessor extends AbstractAMQPProcessor<AMQPConsumer> {
         @Override
-        protected void rendezvousWithAmqp(ProcessContext context, ProcessSession session) throws ProcessException {
+        protected void processResource(Connection connection, AMQPConsumer consumer, ProcessContext context, ProcessSession session) throws ProcessException {
             // nothing to do
         }
+
         @Override
-        protected AMQPConsumer finishBuildingTargetResource(ProcessContext context) {
+        protected AMQPConsumer createAMQPWorker(ProcessContext context, Connection connection) {
             return null;
         }
     }

@@ -17,6 +17,8 @@
 package org.apache.nifi.authorization;
 
 import org.apache.nifi.authorization.resource.Authorizable;
+import org.apache.nifi.components.ConfigurableComponent;
+import org.apache.nifi.components.RequiredPermission;
 import org.apache.nifi.web.api.dto.BundleDTO;
 import org.apache.nifi.web.api.dto.FlowSnippetDTO;
 
@@ -41,6 +43,15 @@ public interface AuthorizableLookup {
     ComponentAuthorizable getConfigurableComponent(String type, BundleDTO bundle);
 
     /**
+     * Get the authorizable for the given ConfigurableComponent. This will use a dummy instance of
+     * the component.
+     *
+     * @param configurableComponent the configurable component
+     * @return authorizable
+     */
+    ComponentAuthorizable getConfigurableComponent(ConfigurableComponent configurableComponent);
+
+    /**
      * Get the authorizable Processor.
      *
      * @param id processor id
@@ -61,6 +72,27 @@ public interface AuthorizableLookup {
      * @return authorizable
      */
     Authorizable getCounters();
+
+    /**
+     * Get the authorizable for retrieving resources.
+     *
+     * @return authorizable
+     */
+    Authorizable getResource();
+
+    /**
+     * Get the authorizable for site to site.
+     *
+     * @return authorizable
+     */
+    Authorizable getSiteToSite();
+
+    /**
+     * Get the authorizable for the flow.
+     *
+     * @return authorizable
+     */
+    Authorizable getFlow();
 
     /**
      * Get the authorizable RootGroup InputPort.
@@ -242,4 +274,12 @@ public interface AuthorizableLookup {
      * @return authorizable
      */
     Authorizable getRestrictedComponents();
+
+    /**
+     * Get the authorizable for accessing restricted components with a specific required permission.
+     *
+     * @param requiredPermission required permission
+     * @return authorizable
+     */
+    Authorizable getRestrictedComponents(RequiredPermission requiredPermission);
 }

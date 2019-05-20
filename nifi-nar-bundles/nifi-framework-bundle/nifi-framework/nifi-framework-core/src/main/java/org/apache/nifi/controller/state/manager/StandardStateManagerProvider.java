@@ -17,17 +17,6 @@
 
 package org.apache.nifi.controller.state.manager;
 
-import java.io.File;
-import java.io.IOException;
-import java.util.Collection;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
-
-import javax.net.ssl.SSLContext;
-
 import org.apache.commons.lang3.ArrayUtils;
 import org.apache.nifi.attribute.expression.language.StandardPropertyValue;
 import org.apache.nifi.bundle.Bundle;
@@ -38,6 +27,7 @@ import org.apache.nifi.components.ValidationResult;
 import org.apache.nifi.components.state.Scope;
 import org.apache.nifi.components.state.StateManager;
 import org.apache.nifi.components.state.StateManagerProvider;
+import org.apache.nifi.components.state.StateMap;
 import org.apache.nifi.components.state.StateProvider;
 import org.apache.nifi.components.state.StateProviderInitializationContext;
 import org.apache.nifi.controller.state.ConfigParseException;
@@ -48,6 +38,7 @@ import org.apache.nifi.controller.state.config.StateProviderConfiguration;
 import org.apache.nifi.framework.security.util.SslContextFactory;
 import org.apache.nifi.logging.ComponentLog;
 import org.apache.nifi.nar.ExtensionManager;
+import org.apache.nifi.nar.NarCloseable;
 import org.apache.nifi.processor.SimpleProcessLogger;
 import org.apache.nifi.processor.StandardValidationContext;
 import org.apache.nifi.registry.VariableRegistry;
@@ -55,8 +46,20 @@ import org.apache.nifi.util.NiFiProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.net.ssl.SSLContext;
+import java.io.File;
+import java.io.IOException;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+
 public class StandardStateManagerProvider implements StateManagerProvider{
     private static final Logger logger = LoggerFactory.getLogger(StandardStateManagerProvider.class);
+
+    private static StateManagerProvider provider;
 
     private final ConcurrentMap<String, StateManager> stateManagers = new ConcurrentHashMap<>();
     private final StateProvider localStateProvider;
@@ -67,33 +70,46 @@ public class StandardStateManagerProvider implements StateManagerProvider{
         this.clusterStateProvider = clusterStateProvider;
     }
 
-    public static StateManagerProvider create(final NiFiProperties properties, final VariableRegistry variableRegistry) throws ConfigParseException, IOException {
-        final StateProvider localProvider = createLocalStateProvider(properties,variableRegistry);
+    public static synchronized StateManagerProvider create(final NiFiProperties properties, final VariableRegistry variableRegistry, final ExtensionManager extensionManager)
+            throws ConfigParseException, IOException {
+        if (provider != null) {
+            return provider;
+        }
+
+        final StateProvider localProvider = createLocalStateProvider(properties,variableRegistry, extensionManager);
 
         final StateProvider clusterProvider;
         if (properties.isNode()) {
-            clusterProvider = createClusteredStateProvider(properties,variableRegistry);
+            clusterProvider = createClusteredStateProvider(properties,variableRegistry, extensionManager);
         } else {
             clusterProvider = null;
         }
 
-        return new StandardStateManagerProvider(localProvider, clusterProvider);
+        provider = new StandardStateManagerProvider(localProvider, clusterProvider);
+        return provider;
     }
 
-    private static StateProvider createLocalStateProvider(final NiFiProperties properties, final VariableRegistry variableRegistry) throws IOException, ConfigParseException {
+    public static synchronized void resetProvider() {
+        provider = null;
+    }
+
+    private static StateProvider createLocalStateProvider(final NiFiProperties properties, final VariableRegistry variableRegistry, final ExtensionManager extensionManager)
+            throws IOException, ConfigParseException {
         final File configFile = properties.getStateManagementConfigFile();
-        return createStateProvider(configFile, Scope.LOCAL, properties, variableRegistry);
+        return createStateProvider(configFile, Scope.LOCAL, properties, variableRegistry, extensionManager);
     }
 
 
-    private static StateProvider createClusteredStateProvider(final NiFiProperties properties, final VariableRegistry variableRegistry) throws IOException, ConfigParseException {
+    private static StateProvider createClusteredStateProvider(final NiFiProperties properties, final VariableRegistry variableRegistry, final ExtensionManager extensionManager)
+            throws IOException, ConfigParseException {
         final File configFile = properties.getStateManagementConfigFile();
-        return createStateProvider(configFile, Scope.CLUSTER, properties, variableRegistry);
+        return createStateProvider(configFile, Scope.CLUSTER, properties, variableRegistry, extensionManager);
     }
 
 
     private static StateProvider createStateProvider(final File configFile, final Scope scope, final NiFiProperties properties,
-                                                     final VariableRegistry variableRegistry) throws ConfigParseException, IOException {
+                                                     final VariableRegistry variableRegistry, final ExtensionManager extensionManager)
+            throws ConfigParseException, IOException {
         final String providerId;
         final String providerIdPropertyName;
         final String providerDescription;
@@ -161,7 +177,7 @@ public class StandardStateManagerProvider implements StateManagerProvider{
 
         final StateProvider provider;
         try {
-            provider = instantiateStateProvider(providerClassName);
+            provider = instantiateStateProvider(extensionManager, providerClassName);
         } catch (final Exception e) {
             throw new RuntimeException("Cannot create " + providerDescription + " of type " + providerClassName, e);
         }
@@ -186,7 +202,7 @@ public class StandardStateManagerProvider implements StateManagerProvider{
             propertyMap.put(descriptor, new StandardPropertyValue(entry.getValue(),null, variableRegistry));
         }
 
-        final SSLContext sslContext = SslContextFactory.createSslContext(properties, false);
+        final SSLContext sslContext = SslContextFactory.createSslContext(properties);
         final ComponentLog logger = new SimpleProcessLogger(providerId, provider);
         final StateProviderInitializationContext initContext = new StandardStateProviderInitializationContext(providerId, propertyMap, sslContext, logger);
 
@@ -215,10 +231,10 @@ public class StandardStateManagerProvider implements StateManagerProvider{
         return provider;
     }
 
-    private static StateProvider instantiateStateProvider(final String type) throws ClassNotFoundException, InstantiationException, IllegalAccessException {
+    private static StateProvider instantiateStateProvider(final ExtensionManager extensionManager, final String type) throws ClassNotFoundException, InstantiationException, IllegalAccessException {
         final ClassLoader ctxClassLoader = Thread.currentThread().getContextClassLoader();
         try {
-            final List<Bundle> bundles = ExtensionManager.getBundles(type);
+            final List<Bundle> bundles = extensionManager.getBundles(type);
             if (bundles.size() == 0) {
                 throw new IllegalStateException(String.format("The specified class '%s' is not known to this nifi.", type));
             }
@@ -232,12 +248,135 @@ public class StandardStateManagerProvider implements StateManagerProvider{
 
             Thread.currentThread().setContextClassLoader(detectedClassLoaderForType);
             final Class<? extends StateProvider> mgrClass = rawClass.asSubclass(StateProvider.class);
-            return mgrClass.newInstance();
+            return withNarClassLoader(mgrClass.newInstance());
         } finally {
             if (ctxClassLoader != null) {
                 Thread.currentThread().setContextClassLoader(ctxClassLoader);
             }
         }
+    }
+
+    /**
+     * Wrap the provider so that all method calls set the context class loader to the NAR's class loader before
+     * executing the actual provider.
+     *
+     * @param stateProvider the base provider to wrap
+     * @return the wrapped provider
+     */
+    private static StateProvider withNarClassLoader(final StateProvider stateProvider) {
+        return new StateProvider() {
+            @Override
+            public void initialize(StateProviderInitializationContext context) throws IOException {
+                try (final NarCloseable narCloseable = NarCloseable.withNarLoader()) {
+                    stateProvider.initialize(context);
+                }
+            }
+
+            @Override
+            public void shutdown() {
+                try (final NarCloseable narCloseable = NarCloseable.withNarLoader()) {
+                    stateProvider.shutdown();
+                }
+            }
+
+            @Override
+            public void setState(Map<String, String> state, String componentId) throws IOException {
+                try (final NarCloseable narCloseable = NarCloseable.withNarLoader()) {
+                    stateProvider.setState(state, componentId);
+                }
+            }
+
+            @Override
+            public StateMap getState(String componentId) throws IOException {
+                try (final NarCloseable narCloseable = NarCloseable.withNarLoader()) {
+                    return stateProvider.getState(componentId);
+                }
+            }
+
+            @Override
+            public boolean replace(StateMap oldValue, Map<String, String> newValue, String componentId) throws IOException {
+                try (final NarCloseable narCloseable = NarCloseable.withNarLoader()) {
+                    return stateProvider.replace(oldValue, newValue, componentId);
+                }
+            }
+
+            @Override
+            public void clear(String componentId) throws IOException {
+                try (final NarCloseable narCloseable = NarCloseable.withNarLoader()) {
+                    stateProvider.clear(componentId);
+                }
+            }
+
+            @Override
+            public void onComponentRemoved(String componentId) throws IOException {
+                try (final NarCloseable narCloseable = NarCloseable.withNarLoader()) {
+                    stateProvider.onComponentRemoved(componentId);
+                }
+            }
+
+            @Override
+            public void enable() {
+                try (final NarCloseable narCloseable = NarCloseable.withNarLoader()) {
+                    stateProvider.enable();
+                }
+            }
+
+            @Override
+            public void disable() {
+                try (final NarCloseable narCloseable = NarCloseable.withNarLoader()) {
+                    stateProvider.disable();
+                }
+            }
+
+            @Override
+            public boolean isEnabled() {
+                try (final NarCloseable narCloseable = NarCloseable.withNarLoader()) {
+                    return stateProvider.isEnabled();
+                }
+            }
+
+            @Override
+            public Scope[] getSupportedScopes() {
+                try (final NarCloseable narCloseable = NarCloseable.withNarLoader()) {
+                    return stateProvider.getSupportedScopes();
+                }
+            }
+
+            @Override
+            public Collection<ValidationResult> validate(ValidationContext context) {
+                try (final NarCloseable narCloseable = NarCloseable.withNarLoader()) {
+                    return stateProvider.validate(context);
+                }
+            }
+
+            @Override
+            public PropertyDescriptor getPropertyDescriptor(String name) {
+                try (final NarCloseable narCloseable = NarCloseable.withNarLoader()) {
+                    return stateProvider.getPropertyDescriptor(name);
+                }
+            }
+
+            @Override
+            public void onPropertyModified(PropertyDescriptor descriptor, String oldValue, String newValue) {
+                try (final NarCloseable narCloseable = NarCloseable.withNarLoader()) {
+                    stateProvider.onPropertyModified(descriptor, oldValue, newValue);
+                }
+            }
+
+            @Override
+            public List<PropertyDescriptor> getPropertyDescriptors() {
+                try (final NarCloseable narCloseable = NarCloseable.withNarLoader()) {
+                    return stateProvider.getPropertyDescriptors();
+                }
+            }
+
+            @Override
+            public String getIdentifier() {
+                try (final NarCloseable narCloseable = NarCloseable.withNarLoader()) {
+                    return stateProvider.getIdentifier();
+                }
+            }
+        };
     }
 
     /**
@@ -285,26 +424,26 @@ public class StandardStateManagerProvider implements StateManagerProvider{
         try {
             mgr.clear(Scope.CLUSTER);
         } catch (final Exception e) {
-            logger.warn("Component with ID {} was removed from NiFi instance but failed to clear clustered state for the component", e);
+            logger.warn("Component with ID {} was removed from NiFi instance but failed to clear clustered state for the component", componentId, e);
         }
 
         try {
             mgr.clear(Scope.LOCAL);
         } catch (final Exception e) {
-            logger.warn("Component with ID {} was removed from NiFi instance but failed to clear local state for the component", e);
+            logger.warn("Component with ID {} was removed from NiFi instance but failed to clear local state for the component", componentId, e);
         }
 
         try {
             localStateProvider.onComponentRemoved(componentId);
         } catch (final Exception e) {
-            logger.warn("Component with ID {} was removed from NiFi instance but failed to cleanup resources used to maintain its local state", e);
+            logger.warn("Component with ID {} was removed from NiFi instance but failed to cleanup resources used to maintain its local state", componentId, e);
         }
 
         if (clusterStateProvider != null) {
             try {
                 clusterStateProvider.onComponentRemoved(componentId);
             } catch (final Exception e) {
-                logger.warn("Component with ID {} was removed from NiFi instance but failed to cleanup resources used to maintain its clustered state", e);
+                logger.warn("Component with ID {} was removed from NiFi instance but failed to cleanup resources used to maintain its clustered state", componentId, e);
             }
         }
     }

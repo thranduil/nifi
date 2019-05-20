@@ -48,6 +48,14 @@ public class TestMSSQL2008DatabaseAdapter {
     }
 
     @Test
+    public void testPagingNoOrderBy() throws Exception {
+        String sql1 = db.getSelectStatement("database.tablename", "some(set),of(columns),that,might,contain,methods,a.*","",null,10L,0L);
+        String expected1 = "SELECT * FROM (SELECT TOP 10 some(set),of(columns),that,might,contain,methods,a.*, ROW_NUMBER() OVER(ORDER BY newid() asc) rnum "
+                + "FROM database.tablename) A WHERE rnum > 0 AND rnum <= 10";
+        Assert.assertEquals(sql1,expected1);
+    }
+
+    @Test
     public void testTOPQuery() throws Exception {
         String sql = db.getSelectStatement("database.tablename", "some(set),of(columns),that,might,contain,methods,a.*", "", "", 100L, null);
         String expected1 = "SELECT TOP 100 some(set),of(columns),that,might,contain,methods,a.* FROM database.tablename";
@@ -78,5 +86,29 @@ public class TestMSSQL2008DatabaseAdapter {
         String expected3 = "SELECT * FROM (SELECT TOP 133456 some(set),of(columns),that,might,contain,methods,a.*, ROW_NUMBER() OVER(ORDER BY contain asc) rnum FROM database.tablename "
                 + "WHERE methods='strange' ORDER BY contain) A WHERE rnum > 123456 AND rnum <= 133456";
         Assert.assertEquals(expected3, sql);
+    }
+
+    @Test
+    public void testPagingQueryUsingColumnValuesForPartitioning() {
+        String sql1 = db.getSelectStatement("database.tablename", "some(set),of(columns),that,might,contain,methods,a.*", "1=1", "contain",
+                100L, 0L, "contain");
+        String expected1 = "SELECT some(set),of(columns),that,might,contain,methods,a.* FROM database.tablename WHERE 1=1 AND contain >= 0 AND contain < 100";
+        Assert.assertEquals(expected1, sql1);
+
+        String sql2 = db.getSelectStatement("database.tablename", "some(set),of(columns),that,might,contain,methods,a.*", "1=1", "contain",
+                10000L, 123456L, "contain");
+        String expected2 = "SELECT some(set),of(columns),that,might,contain,methods,a.* FROM database.tablename WHERE 1=1 AND contain >= 123456 AND contain < 133456";
+        Assert.assertEquals(expected2, sql2);
+
+        String sql3 = db.getSelectStatement("database.tablename", "some(set),of(columns),that,might,contain,methods,a.*", "methods='strange'",
+                "contain", 10000L, 123456L, "contain");
+        String expected3 = "SELECT some(set),of(columns),that,might,contain,methods,a.* FROM database.tablename WHERE methods='strange' AND contain >= 123456 AND contain < 133456";
+        Assert.assertEquals(expected3, sql3);
+
+        // Paging (limit/offset) is only supported when an orderByClause is supplied, note that it is not honored here
+        String sql4 = db.getSelectStatement("database.tablename", "some(set),of(columns),that,might,contain,methods,a.*", "", "",
+                100L, null, "contain");
+        String expected4 = "SELECT some(set),of(columns),that,might,contain,methods,a.* FROM database.tablename";
+        Assert.assertEquals(expected4, sql4);
     }
 }

@@ -31,6 +31,7 @@ import java.util.Map;
 import java.util.UUID;
 
 import javax.json.Json;
+import javax.json.JsonObject;
 import javax.json.JsonReader;
 import javax.json.JsonString;
 
@@ -59,7 +60,7 @@ public class TestSiteToSiteStatusReportingTask {
     private ReportingContext context;
 
     public MockSiteToSiteStatusReportingTask initTask(Map<PropertyDescriptor, String> customProperties,
-            ProcessGroupStatus pgStatus) throws InitializationException {
+            ProcessGroupStatus pgStatus) throws InitializationException, IOException {
         final MockSiteToSiteStatusReportingTask task = new MockSiteToSiteStatusReportingTask();
         Map<PropertyDescriptor, String> properties = new HashMap<>();
         for (final PropertyDescriptor descriptor : task.getSupportedPropertyDescriptors()) {
@@ -128,6 +129,27 @@ public class TestSiteToSiteStatusReportingTask {
         JsonReader jsonReader = Json.createReader(new ByteArrayInputStream(msg.getBytes()));
         JsonString componentId = jsonReader.readArray().getJsonObject(0).getJsonString("componentId");
         assertEquals(pgStatus.getId(), componentId.getString());
+    }
+
+    @Test
+    public void testConnectionStatus() throws IOException, InitializationException {
+        final ProcessGroupStatus pgStatus = generateProcessGroupStatus("root", "Awesome", 1, 0);
+
+        final Map<PropertyDescriptor, String> properties = new HashMap<>();
+        properties.put(SiteToSiteStatusReportingTask.BATCH_SIZE, "4");
+        properties.put(SiteToSiteStatusReportingTask.COMPONENT_NAME_FILTER_REGEX, "Awesome.*");
+        properties.put(SiteToSiteStatusReportingTask.COMPONENT_TYPE_FILTER_REGEX, "(Connection)");
+
+        MockSiteToSiteStatusReportingTask task = initTask(properties, pgStatus);
+        task.onTrigger(context);
+
+        final String msg = new String(task.dataSent.get(0), StandardCharsets.UTF_8);
+        JsonReader jsonReader = Json.createReader(new ByteArrayInputStream(msg.getBytes()));
+        JsonObject object = jsonReader.readArray().getJsonObject(0);
+        JsonString backpressure = object.getJsonString("isBackPressureEnabled");
+        JsonString source = object.getJsonString("sourceName");
+        assertEquals("true", backpressure.getString());
+        assertEquals("source", source.getString());
     }
 
     @Test
@@ -300,6 +322,10 @@ public class TestSiteToSiteStatusReportingTask {
         cStatus.setOutputCount(7);
         cStatus.setQueuedBytes(8l);
         cStatus.setQueuedCount(9);
+        cStatus.setSourceId(id);
+        cStatus.setSourceName("source");
+        cStatus.setDestinationId(id);
+        cStatus.setDestinationName("destination");
 
         return cStatus;
     }
@@ -311,6 +337,10 @@ public class TestSiteToSiteStatusReportingTask {
     }
 
     private static final class MockSiteToSiteStatusReportingTask extends SiteToSiteStatusReportingTask {
+
+        public MockSiteToSiteStatusReportingTask() throws IOException {
+            super();
+        }
 
         final List<byte[]> dataSent = new ArrayList<>();
 

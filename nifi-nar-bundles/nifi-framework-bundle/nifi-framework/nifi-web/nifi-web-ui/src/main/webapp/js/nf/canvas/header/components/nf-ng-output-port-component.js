@@ -22,17 +22,19 @@
         define(['jquery',
                 'nf.Client',
                 'nf.Birdseye',
+                'nf.Storage',
                 'nf.Graph',
                 'nf.CanvasUtils',
                 'nf.ErrorHandler'],
-            function ($, nfClient, nfBirdseye, nfGraph, nfCanvasUtils, nfErrorHandler) {
-                return (nf.ng.OutputPortComponent = factory($, nfClient, nfBirdseye, nfGraph, nfCanvasUtils, nfErrorHandler));
+            function ($, nfClient, nfBirdseye, nfStorage, nfGraph, nfCanvasUtils, nfErrorHandler) {
+                return (nf.ng.OutputPortComponent = factory($, nfClient, nfBirdseye, nfStorage, nfGraph, nfCanvasUtils, nfErrorHandler));
             });
     } else if (typeof exports === 'object' && typeof module === 'object') {
         module.exports = (nf.ng.OutputPortComponent =
             factory(require('jquery'),
                 require('nf.Client'),
                 require('nf.Birdseye'),
+                require('nf.Storage'),
                 require('nf.Graph'),
                 require('nf.CanvasUtils'),
                 require('nf.ErrorHandler')));
@@ -40,11 +42,12 @@
         nf.ng.OutputPortComponent = factory(root.$,
             root.nf.Client,
             root.nf.Birdseye,
+            root.nf.Storage,
             root.nf.Graph,
             root.nf.CanvasUtils,
             root.nf.ErrorHandler);
     }
-}(this, function ($, nfClient, nfBirdseye, nfGraph, nfCanvasUtils, nfErrorHandler) {
+}(this, function ($, nfClient, nfBirdseye, nfStorage, nfGraph, nfCanvasUtils, nfErrorHandler) {
     'use strict';
 
     return function (serviceProvider) {
@@ -63,6 +66,7 @@
                         'version': 0
                     }
                 }),
+                'disconnectedNodeAcknowledged': nfStorage.isDisconnectionAcknowledged(),
                 'component': {
                     'name': portName,
                     'position': {
@@ -87,12 +91,15 @@
                     'selectAll': true
                 });
 
+                // hide the dialog
+                outputPortComponent.modal.hide();
+
                 // update component visibility
                 nfGraph.updateVisibility();
 
                 // update the birdseye
                 nfBirdseye.refresh();
-            }).fail(nfErrorHandler.handleAjaxError);
+            }).fail(nfErrorHandler.handleConfigurationUpdateAjaxError);
         };
 
         function OutputPortComponent() {
@@ -203,9 +210,6 @@
                 var addOutputPort = function () {
                     // get the name of the output port and clear the textfield
                     var portName = $('#new-port-name').val();
-
-                    // hide the dialog
-                    outputPortComponent.modal.hide();
 
                     // create the output port
                     createOutputPort(portName, pt);
